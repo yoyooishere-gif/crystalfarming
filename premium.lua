@@ -6,7 +6,7 @@ end
 
 -- Konfigurasi umum
 local CONFIG = {
-    DelayBeforeStart    = 12,           -- jeda sebelum mulai hop (detik)
+    DelayBeforeStart    = 7,           -- jeda sebelum mulai hop (detik)
 
     MaxPagesToScan      = 1,            -- JUMLAH halaman yang dipakai untuk cari kandidat
     RandomStartPage     = true,         -- mulai dari page acak
