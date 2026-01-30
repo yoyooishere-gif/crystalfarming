@@ -6,7 +6,7 @@ end
 
 -- Konfigurasi umum
 local CONFIG = {
-    DelayBeforeStart   = 12,   -- jeda sebelum mulai hop (detik)
+    DelayBeforeStart   = 5,   -- jeda sebelum mulai hop (detik)
     MinPlayers         = 7,    -- minimal pemain di server tujuan
     MaxPlayers         = 15,   -- maksimal pemain di server tujuan
     MaxPagesToScan     = 6,    -- maksimal halaman server yang discan
