@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER ]==--
+--==[ ADVANCED SERVER HOPPER – ADAPTIVE RANGE ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -8,16 +8,20 @@ end
 local CONFIG = {
     DelayBeforeStart   = 12,   -- jeda sebelum mulai hop (detik)
 
-    -- 🎯 Range target pemain
-    MinPlayers         = 7,    -- minimal pemain di server tujuan (target utama)
-    MaxPlayers         = 12,   -- maksimal pemain di server tujuan (target utama)
+    -- 🎯 Range target utama
+    MinPlayers         = 7,    -- minimal pemain di server tujuan
+    MaxPlayers         = 12,   -- maksimal pemain di server tujuan
 
-    -- 🔻 Batas bawah untuk server cadangan (backup),
-    -- supaya kalau pun di luar range 7–12, tetap nggak terlalu sepi
+    -- 🔻 Batas bawah agar server cadangan tetap lumayan rame
     MinPlayersFloor    = 5,
 
-    MaxPagesToScan     = 6,    -- maksimal halaman server yang discan
-    RandomStartPage    = true, -- mulai dari page acak
+    -- 📈 Adaptive range
+    RangeExpandStep    = 2,    -- tiap step, min -= 2, max += 2
+    MaxExpandSteps     = 3,    -- berapa kali range diperluas dari range utama
+
+    MaxPagesToScan     = 4,    -- maksimal halaman server yang discan
+    RandomStartPage    = false,-- kalau mau random page, set true
+
     UseAntiFriend      = true, -- cek teman di server sekarang
     RememberVisited    = true, -- ingat server yang sudah dikunjungi
     ResetVisitedAfter  = 150,  -- kalau visited > ini, reset list
@@ -105,7 +109,6 @@ end
 local HTTP_OK = true
 
 do
-    -- ⚠️ Di sini juga kita ubah ke Desc biar tesnya sama dengan mode advanced
     local testUrl = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=10")
         :format(placeId)
 
@@ -129,7 +132,7 @@ do
 end
 
 ----------------------------------------------------------------
--- 🪂 Mode simple (kalau HTTP tidak bisa)
+-- 🪂 Mode simple (kalau HTTP benar-benar nggak bisa)
 ----------------------------------------------------------------
 local function SimpleRejoin()
     warn("[ServerHop] Mode simple aktif (tanpa server list). Rejoin place saja.")
@@ -147,17 +150,27 @@ if not HTTP_OK then
 end
 
 ----------------------------------------------------------------
--- 📄 Ambil server list (Advanced mode)
+-- 📄 Ambil server list (Advanced mode) + Cooldown & anti 429
 ----------------------------------------------------------------
-local cursor = nil
+local cursor            = nil
+local LAST_HTTP_TIME    = 0
+local HTTP_COOLDOWN     = 12  -- detik, sesuai permintaan kamu
+local HIT_RATE_LIMIT    = false
 
 local function GetServers()
-    -- 🔄 Ubah sortOrder ke Desc → ambil server ramai dulu
+    -- Cooldown biar nggak spam API (anti 429)
+    local now = os.clock()
+    local diff = now - LAST_HTTP_TIME
+    if diff < HTTP_COOLDOWN then
+        task.wait(HTTP_COOLDOWN - diff)
+    end
+    LAST_HTTP_TIME = os.clock()
+
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100")
         :format(placeId)
 
     if cursor then
-        url = url .. "&cursor=" .. cursor
+        url ..= "&cursor=" .. cursor
     end
 
     local ok, result = pcall(function()
@@ -165,7 +178,14 @@ local function GetServers()
     end)
 
     if not ok then
-        warn("[ServerHop] Gagal ambil server list:", result)
+        local msg = tostring(result)
+        if msg:find("429") then
+            HIT_RATE_LIMIT = true
+            warn("[ServerHop] Gagal ambil server list: HTTP 429 (Too Many Requests). Cooldown 12 detik.")
+            task.wait(12)
+        else
+            warn("[ServerHop] Gagal ambil server list:", msg)
+        end
         return nil
     end
 
@@ -174,7 +194,7 @@ local function GetServers()
         decoded = HttpService:JSONDecode(result)
     end)
 
-    if not okDecode then
+    if not okDecode or not decoded then
         warn("[ServerHop] Gagal decode JSON server list:", errDecode)
         return nil
     end
@@ -198,17 +218,12 @@ if CONFIG.RandomStartPage then
     print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
 end
 
-print(("[ServerHop] Target server: %d–%d pemain"):format(CONFIG.MinPlayers, CONFIG.MaxPlayers))
+print(("[ServerHop] Target awal: %d–%d pemain"):format(CONFIG.MinPlayers, CONFIG.MaxPlayers))
 
 ----------------------------------------------------------------
--- 🔎 Kumpulkan kandidat server
---     - tidak penuh
---     - jumlah pemain di range
---     - belum pernah dikunjungi (kalau RememberVisited = true)
---     - backup juga punya batas bawah (MinPlayersFloor)
+-- 🔎 Kumpulkan semua server kandidat (sekali HTTP saja)
 ----------------------------------------------------------------
-local candidates = {}
-local backups    = {}  -- server yang tidak masuk range player tapi bisa join
+local allServers = {}
 
 for page = 1, CONFIG.MaxPagesToScan do
     local servers = GetServers()
@@ -220,31 +235,14 @@ for page = 1, CONFIG.MaxPagesToScan do
         local maxPlr    = server.maxPlayers
 
         local notFull    = playing < maxPlr
-        local inRange    = playing >= CONFIG.MinPlayers and playing <= CONFIG.MaxPlayers
         local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
 
         if notFull and notVisited then
-            local info = {
+            table.insert(allServers, {
                 id      = sid,
                 playing = playing,
                 max     = maxPlr,
-                score   = 0,
-            }
-
-            -- Skor: makin dekat ke tengah range, makin bagus
-            local mid  = (CONFIG.MinPlayers + CONFIG.MaxPlayers) / 2
-            local dist = math.abs(playing - mid)
-            info.score = -dist + math.random() -- sedikit random biar variatif
-
-            if inRange then
-                -- 🎯 Server di range ideal 7–12
-                table.insert(candidates, info)
-            else
-                -- 📦 Backup: hanya ambil kalau pemainnya >= MinPlayersFloor
-                if playing >= CONFIG.MinPlayersFloor then
-                    table.insert(backups, info)
-                end
-            end
+            })
         end
     end
 
@@ -253,26 +251,89 @@ for page = 1, CONFIG.MaxPagesToScan do
     end
 end
 
--- Fungsi pilih server dengan score terbaik dari list
-local function pickBest(list)
-    if #list == 0 then return nil end
-    local best = list[1]
-    for i = 2, #list do
-        if list[i].score > best.score then
-            best = list[i]
+if #allServers == 0 then
+    if HIT_RATE_LIMIT then
+        warn("[ServerHop] Kena rate limit, tidak hop lagi di join ini supaya tidak spam.")
+        return
+    else
+        warn("[ServerHop] Tidak ada data server (advanced). Rejoin biasa.")
+        SimpleRejoin()
+        return
+    end
+end
+
+----------------------------------------------------------------
+-- ⚙️ Fungsi pilih server terbaik dengan skor
+----------------------------------------------------------------
+local function pickBestInRange(minPlayers, maxPlayers)
+    local mid = (minPlayers + maxPlayers) / 2
+    local best, bestScore = nil, nil
+
+    for _, info in ipairs(allServers) do
+        local p = info.playing
+        if p >= minPlayers and p <= maxPlayers then
+            local dist  = math.abs(p - mid)
+            local score = -dist + math.random() -- makin dekat ke mid makin bagus
+
+            if not best or score > bestScore then
+                best      = info
+                bestScore = score
+            end
         end
     end
+
     return best
 end
 
-local target = pickBest(candidates)
+local function pickBestAboveFloor(floor)
+    local best, bestScore = nil, nil
+
+    for _, info in ipairs(allServers) do
+        local p = info.playing
+        if p >= floor then
+            local score = p + math.random() -- makin rame makin prioritas
+            if not best or score > bestScore then
+                best      = info
+                bestScore = score
+            end
+        end
+    end
+
+    return best
+end
+
+----------------------------------------------------------------
+-- 📈 Adaptive range: 7–12 → (5–14) → (5–16) → ...
+----------------------------------------------------------------
+local baseMin = CONFIG.MinPlayers
+local baseMax = CONFIG.MaxPlayers
+local step    = CONFIG.RangeExpandStep
+local maxStep = CONFIG.MaxExpandSteps
+
+local target = nil
+
+for i = 0, maxStep do
+    local minP = baseMin - step * i
+    local maxP = baseMax + step * i
+
+    if minP < CONFIG.MinPlayersFloor then
+        minP = CONFIG.MinPlayersFloor
+    end
+
+    warn(("[ServerHop] Coba range %d–%d (expand step %d)"):format(minP, maxP, i))
+    target = pickBestInRange(minP, maxP)
+    if target then
+        break
+    end
+end
 
 if not target then
-    if #backups > 0 then
-        warn("[ServerHop] Tidak ada server pas 7–12 pemain, pakai server cadangan (>= MinPlayersFloor).")
-        target = pickBest(backups)
+    -- Tidak ada di range adaptif, pakai server terpadat di atas MinPlayersFloor
+    target = pickBestAboveFloor(CONFIG.MinPlayersFloor)
+    if target then
+        warn("[ServerHop] Tidak ada server di range adaptif, pakai server terpadat di atas floor.")
     else
-        warn("[ServerHop] Tidak ada server lain yang bisa dimasuki (advanced). Rejoin biasa.")
+        warn("[ServerHop] Tidak ada server lain yang bisa dimasuki. Rejoin biasa.")
         SimpleRejoin()
         return
     end
