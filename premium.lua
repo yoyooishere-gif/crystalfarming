@@ -6,13 +6,19 @@ end
 
 -- Konfigurasi umum
 local CONFIG = {
-    DelayBeforeStart    = 12,      -- jeda sebelum mulai hop (detik)
-    MaxPagesToScan      = 6,       -- maksimal halaman server yang discan
-    RandomStartPage     = true,    -- mulai dari page acak
-    UseAntiFriend       = true,    -- cek teman di server sekarang
-    RememberVisited     = true,    -- ingat server yang sudah dikunjungi
-    ResetVisitedAfter   = 300,     -- kalau total data visited > ini, reset penuh
-    VisitExpirySeconds  = 2 * 60 * 60, -- EXP: 2 jam (dalam detik)
+    DelayBeforeStart    = 12,           -- jeda sebelum mulai hop (detik)
+
+    MaxPagesToScan      = 1,            -- JUMLAH halaman yang dipakai untuk cari kandidat
+    RandomStartPage     = true,         -- mulai dari page acak
+    MaxRandomSkipPages  = 5,            -- MAKS halaman yang boleh di-skip random sebelum scan
+
+    UseAntiFriend       = true,         -- cek teman di server sekarang
+    RememberVisited     = true,         -- ingat server yang sudah dikunjungi
+    ResetVisitedAfter   = 300,          -- kalau total data visited > ini, reset penuh
+    VisitExpirySeconds  = 2 * 60 * 60,  -- EXP: 2 jam (dalam detik)
+
+    HttpMinInterval     = 1.5,          -- MIN jeda antar HttpGet ke games.roblox.com
+    Http429Cooldown     = 20,           -- kalau kena 429, tunggu detik ini dulu
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -135,6 +141,27 @@ else
 end
 
 ----------------------------------------------------------------
+-- 🌐 Helper HttpGet aman (rate limit di sisi client)
+----------------------------------------------------------------
+local lastHttpTime = 0
+
+local function SafeHttpGet(url)
+    -- Jaga jeda minimal antar request
+    local now = os.clock()
+    local delta = now - lastHttpTime
+    if delta < CONFIG.HttpMinInterval then
+        task.wait(CONFIG.HttpMinInterval - delta)
+    end
+
+    local ok, res = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    lastHttpTime = os.clock()
+    return ok, res
+end
+
+----------------------------------------------------------------
 -- 🌐 Cek apakah HTTP ke games.roblox.com tersedia
 ----------------------------------------------------------------
 local HTTP_OK = true
@@ -143,14 +170,18 @@ do
     local testUrl = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=10")
         :format(placeId)
 
-    local ok, res = pcall(function()
-        return game:HttpGet(testUrl)
-    end)
+    local ok, res = SafeHttpGet(testUrl)
 
     if not ok then
+        local errStr = tostring(res)
+        if errStr:find("429") or errStr:lower():find("too many requests") then
+            warn("[ServerHop] Kena rate limit HTTP 429 saat cek awal. Cooldown " ..
+                CONFIG.Http429Cooldown .. " detik, lalu pakai mode simple.")
+            task.wait(CONFIG.Http429Cooldown)
+        else
+            warn("[ServerHop] HTTP ke games.roblox.com gagal:", errStr)
+        end
         HTTP_OK = false
-        warn("[ServerHop] HTTP ke games.roblox.com diblokir oleh executor / device.")
-        warn("[ServerHop] Pindah ke mode sederhana: rejoin biasa.")
     else
         local okDecode = pcall(function()
             HttpService:JSONDecode(res)
@@ -193,12 +224,18 @@ local function GetServers()
         url = url .. "&cursor=" .. cursor
     end
 
-    local ok, result = pcall(function()
-        return game:HttpGet(url)
-    end)
+    local ok, result = SafeHttpGet(url)
 
     if not ok then
-        warn("[ServerHop] Gagal ambil server list:", result)
+        local errStr = tostring(result)
+        if errStr:find("429") or errStr:lower():find("too many requests") then
+            warn("[ServerHop] Kena rate limit HTTP 429 saat ambil server list. Cooldown " ..
+                CONFIG.Http429Cooldown .. " detik, lalu hentikan mode advanced.")
+            task.wait(CONFIG.Http429Cooldown)
+            return nil
+        end
+
+        warn("[ServerHop] Gagal ambil server list:", errStr)
         return nil
     end
 
@@ -220,12 +257,18 @@ end
 -- 🎲 Skip ke page acak dulu (RandomStartPage)
 ----------------------------------------------------------------
 if CONFIG.RandomStartPage then
-    local maxSkip = math.max(0, CONFIG.MaxPagesToScan - 1)
+    -- reset cursor biar mulai dari awal chain
+    cursor = nil
+
+    -- Berapa banyak halaman yang di-skip random (independen dari MaxPagesToScan)
+    local maxSkip   = math.max(0, CONFIG.MaxRandomSkipPages)
     local skipPages = math.random(0, maxSkip)
 
     for _ = 1, skipPages do
         local servers = GetServers()
-        if not servers or not cursor then break end
+        if not servers or not cursor then
+            break
+        end
     end
 
     print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
