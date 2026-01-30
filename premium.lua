@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – ADAPTIVE & ANTI 429 ]==--
+--==[ ADVANCED SERVER HOPPER – ADAPTIVE, ANTI 429, VISITED 2 JAM ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -22,8 +22,7 @@ local CONFIG = {
     RandomStartPage    = false,
 
     UseAntiFriend      = true,
-    RememberVisited    = true,
-    ResetVisitedAfter  = 150,
+    RememberVisited    = true, -- pakai sistem visited 2 jam
 }
 
 task.wait(CONFIG.DelayBeforeStart)
@@ -38,22 +37,40 @@ local placeId     = game.PlaceId
 math.randomseed(os.time())
 
 ----------------------------------------------------------------
--- 🔁 GLOBAL visited
+-- 🔁 VISITED (tidak masuk server yang sama < 2 jam)
 ----------------------------------------------------------------
-local env = getgenv and getgenv() or _G
-env.AdvServerHopVisited = env.AdvServerHopVisited or {}
-local visited = env.AdvServerHopVisited
+local VISITED_TTL_SECONDS = 2 * 60 * 60  -- 2 jam
 
-local function countVisited()
-    local n = 0
-    for _ in pairs(visited) do n += 1 end
-    return n
+-- simpan di getgenv supaya kepakai antar eksekusi script
+local env = getgenv and getgenv() or _G
+env.AdvServerHopVisitedTimes = env.AdvServerHopVisitedTimes or {}
+env.AdvServerHopVisitedTimes[placeId] = env.AdvServerHopVisitedTimes[placeId] or {}
+
+-- visited khusus per place
+local visited = env.AdvServerHopVisitedTimes[placeId]
+
+-- bersihkan entry yang sudah lebih dari 2 jam
+local function cleanupVisited()
+    local now = os.time()
+    for jobId, t in pairs(visited) do
+        if (now - t) > VISITED_TTL_SECONDS then
+            visited[jobId] = nil
+        end
+    end
 end
 
-if CONFIG.RememberVisited and countVisited() > CONFIG.ResetVisitedAfter then
-    visited = {}
-    env.AdvServerHopVisited = visited
-    warn("[ServerHop] Reset daftar visited server (kebanyakan).")
+-- cek apakah server pernah dikunjungi < 2 jam
+local function wasVisitedRecently(jobId)
+    cleanupVisited()
+    local t = visited[jobId]
+    if not t then return false end
+    return (os.time() - t) <= VISITED_TTL_SECONDS
+end
+
+-- tandai server baru dikunjungi
+local function markVisited(jobId)
+    cleanupVisited()
+    visited[jobId] = os.time()
 end
 
 ----------------------------------------------------------------
@@ -102,7 +119,7 @@ else
 end
 
 ----------------------------------------------------------------
--- 📄 Ambil server list (tanpa mode simple / rejoin)
+-- 📄 Ambil server list (anti-429)
 ----------------------------------------------------------------
 local cursor            = nil
 local LAST_HTTP_TIME    = 0
@@ -121,7 +138,7 @@ local function GetServers()
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100")
         :format(placeId)
     if cursor then
-        url ..= "&cursor=" .. cursor
+        url = url .. "&cursor=" .. cursor
     end
 
     local ok, result = pcall(function()
@@ -184,15 +201,18 @@ for page = 1, CONFIG.MaxPagesToScan do
         local playing   = server.playing
         local maxPlr    = server.maxPlayers
 
-        local notFull    = playing < maxPlr
-        local notVisited = (not CONFIG.RememberVisited) or (not visited[sid])
+        local notFull        = playing < maxPlr
+        local notVisitedRecently = (not CONFIG.RememberVisited) or (not wasVisitedRecently(sid))
 
-        if notFull and notVisited then
+        if notFull and notVisitedRecently then
             table.insert(allServers, {
                 id      = sid,
                 playing = playing,
                 max     = maxPlr,
             })
+        elseif CONFIG.RememberVisited and wasVisitedRecently(sid) then
+            -- Debug info: server dilewati karena pernah dikunjungi < 2 jam
+            warn("[ServerHop] Skip server " .. tostring(sid) .. " (pernah dikunjungi < 2 jam).")
         end
     end
 
@@ -240,7 +260,7 @@ local function pickBestAboveFloor(floor)
     for _, info in ipairs(allServers) do
         local p = info.playing
         if p >= floor then
-            local score = p + math.random()
+            local score = p + math.random() -- makin rame makin prioritas
             if not best or score > bestScore then
                 best      = info
                 bestScore = score
@@ -251,7 +271,7 @@ local function pickBestAboveFloor(floor)
     return best
 end
 
--- Adaptive range: 7–12 → 5–14 → dst
+-- Adaptive range: 7–12 → (5–14) → dst
 local baseMin = CONFIG.MinPlayers
 local baseMax = CONFIG.MaxPlayers
 local step    = CONFIG.RangeExpandStep
@@ -290,7 +310,7 @@ print(("[ServerHop] Teleport ke server %s (%d/%d pemain)")
     :format(target.id, target.playing, target.max))
 
 if CONFIG.RememberVisited then
-    visited[target.id] = true
+    markVisited(target.id)
 end
 
 local okTp, tpErr = pcall(function()
