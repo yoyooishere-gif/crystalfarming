@@ -1,4 +1,4 @@
---==[ ADVANCED SERVER HOPPER – NO DUPLICATE SERVER (<2 JAM) ]==--
+--==[ ADVANCED SERVER HOPPER – MID TRAFFIC + NO DUPLICATE SERVER (<2 JAM) ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -12,10 +12,17 @@ local CONFIG = {
     RandomStartPage     = true,         -- mulai dari page acak
     MaxRandomSkipPages  = 5,            -- MAKS halaman yang boleh di-skip random sebelum scan
 
+    MinPlayers          = 3,            -- ⬅️ MINIMAL pemain di server (supaya tidak 1/20)
+                                        -- ganti jadi 2/4/5 sesukamu
+
     UseAntiFriend       = true,         -- cek teman di server sekarang
     RememberVisited     = true,         -- ingat server yang sudah dikunjungi
     ResetVisitedAfter   = 300,          -- kalau total data visited > ini, reset penuh
     VisitExpirySeconds  = 2 * 60 * 60,  -- EXP: 2 jam (dalam detik)
+
+    -- Prioritas trafik menengah:
+    -- 0.5 = sekitar 50% penuh, 0.7 = cenderung lebih rame, 0.3 = agak sepi
+    MidTrafficRatio     = 0.5,
 
     HttpMinInterval     = 1.5,          -- MIN jeda antar HttpGet ke games.roblox.com
     Http429Cooldown     = 20,           -- kalau kena 429, tunggu detik ini dulu
@@ -274,12 +281,15 @@ if CONFIG.RandomStartPage then
     print("[ServerHop] Mulai scan dari page acak, skip halaman:", skipPages)
 end
 
-print("[ServerHop] Mode bebas jumlah pemain, hanya skip server yang sudah pernah dimasuki (<2 jam).")
+print(("[ServerHop] Mode trafik menengah, minimal %d pemain, skip server yang sudah pernah dimasuki (<2 jam).")
+    :format(CONFIG.MinPlayers))
 
 ----------------------------------------------------------------
 -- 🔎 Kumpulkan kandidat server
 --     - tidak penuh
+--     - pemain >= MinPlayers
 --     - belum pernah dikunjungi dalam 2 jam terakhir (kalau RememberVisited = true)
+--     - pilih yang paling dekat ke trafik menengah (MidTrafficRatio)
 ----------------------------------------------------------------
 local candidates = {}
 
@@ -292,14 +302,21 @@ for page = 1, CONFIG.MaxPagesToScan do
         local playing = server.playing
         local maxPlr  = server.maxPlayers
 
-        local notFull    = playing < maxPlr
-        local notVisited = (not CONFIG.RememberVisited) or (not isStillVisited(sid))
+        local notFull       = playing < maxPlr
+        local enoughPlayers = playing >= CONFIG.MinPlayers
+        local notVisited    = (not CONFIG.RememberVisited) or (not isStillVisited(sid))
 
-        if notFull and notVisited then
+        if notFull and enoughPlayers and notVisited then
+            -- Hitung skor berdasarkan seberapa dekat ke trafik menengah
+            local target = math.max(1, math.floor(maxPlr * CONFIG.MidTrafficRatio))
+            local dist   = math.abs(playing - target)
+            local score  = -dist + math.random()  -- sedikit random biar nggak kaku
+
             table.insert(candidates, {
                 id      = sid,
                 playing = playing,
                 max     = maxPlr,
+                score   = score,
             })
         end
     end
@@ -309,16 +326,22 @@ for page = 1, CONFIG.MaxPagesToScan do
     end
 end
 
--- Fungsi pilih server random dari kandidat
-local function pickRandom(list)
+-- Fungsi pilih server dengan skor terbaik
+local function pickBest(list)
     if #list == 0 then return nil end
-    return list[math.random(1, #list)]
+    local best = list[1]
+    for i = 2, #list do
+        if list[i].score > best.score then
+            best = list[i]
+        end
+    end
+    return best
 end
 
-local target = pickRandom(candidates)
+local target = pickBest(candidates)
 
 if not target then
-    warn("[ServerHop] Tidak menemukan server lain yang belum dikunjungi (advanced). Rejoin biasa.")
+    warn("[ServerHop] Tidak menemukan server lain yang memenuhi syarat (advanced). Rejoin biasa.")
     SimpleRejoin()
     return
 end
